@@ -11,7 +11,7 @@ In this R notebook, we look at data on outcomes after aortic surgery in Brazil b
 # Setup
 ## Libraries
 Import the necessary libraries:
-```{r, message=FALSE, warning=FALSE}
+```{r, message=FALSE}
 library(dplyr)
 library(magrittr)
 library(purrr)
@@ -21,6 +21,9 @@ library(future)
 library(furrr)
 library(kableExtra)
 library(blscrapeR)
+library(ggplot2)
+library(tibble)
+library(rdd)
 ```
 ## Data
 We define a function to help us import the data:
@@ -33,8 +36,9 @@ import_flat <- function(.type = c('Open','Endo')) {
   if(!(.type %in% c('Open','Endo'))) {
     warning('invalid type')
   }
-  .filepath = paste0("C:\\Users\\saiee\\OneDrive\\Documents\\_Northwestern Residency\\Research\\Miscellaneous Analyses\\Lopes, Lara\\Brazil COVID Stats ",
-                    .type,".csv")
+  # .filepath = paste0("C:\\Users\\saiee\\OneDrive\\Documents\\_Northwestern Residency\\Research\\Miscellaneous Analyses\\Lopes, Lara\\Brazil COVID Stats ",
+  #                   .type,".csv")
+  .filepath = paste0("data\\Brazil COVID Stats ",.type,".csv")
   lara = read.csv(.filepath)
   
   lara %<>%
@@ -63,7 +67,8 @@ import <- function(.type = c('Open','Endo')) {
   if(!(.type %in% c('Open','Endo'))) {
     warning('invalid type')
   }
-  .filepath = paste0("C:\\Users\\saiee\\OneDrive\\Documents\\_Northwestern Residency\\Research\\Miscellaneous Analyses\\Lopes, Lara\\Brazil COVID Stats ", .type,".csv")
+  # .filepath = paste0("C:\\Users\\saiee\\OneDrive\\Documents\\_Northwestern Residency\\Research\\Miscellaneous Analyses\\Lopes, Lara\\Brazil COVID Stats ", .type,".csv")
+  .filepath = paste0("data\\Brazil COVID Stats ",.type,".csv")
   lara = read.csv(.filepath)
   
   lara %<>%
@@ -84,8 +89,8 @@ import <- function(.type = c('Open','Endo')) {
     pivot_longer(cols = all_of(c(varnames,'ALIVE','MORTALITY_ODDS')), names_to = 'VARIABLE', values_to = 'VALUE')  %>%
     mutate(VARIABLE = as.factor(VARIABLE) %>% as.character(),
            TYPE = as.factor(TYPE) %>% as.character(),
-           URGENCY = as.factor(URGENCY) %>% recode('ALL' = 'ALL URGENCY') %>% as.character(),
-           POPULATION = as.factor(POPULATION) %>% recode('GLOBAL' = 'ALL PEOPLE') %>% as.character())
+           URGENCY = case_match(URGENCY, 'ALL' ~ 'ALL URGENCY', .default = URGENCY),
+           POPULATION = case_match(POPULATION, 'GLOBAL' ~ 'ALL PEOPLE', .default = POPULATION))
   
   return(lara)
 }
@@ -96,7 +101,8 @@ import_bymonth <- function(.type = c('open','endo')) {
   if(!(.type %in% c('open','endo'))) {
     warning('invalid type')
   }
-  .filepath = paste0("C:\\Users\\saiee\\OneDrive\\Documents\\_Northwestern Residency\\Research\\Miscellaneous Analyses\\Lopes, Lara\\brazil_aorta_", .type,"_bymonth.csv")
+  # .filepath = paste0("C:\\Users\\saiee\\OneDrive\\Documents\\_Northwestern Residency\\Research\\Miscellaneous Analyses\\Lopes, Lara\\brazil_aorta_", .type,"_bymonth.csv")
+  .filepath = paste0("data\\brazil_aorta_", .type,"_bymonth.csv")
   lara_bymonth = read.csv(.filepath)
   
   lara_bymonth %<>%
@@ -104,31 +110,34 @@ import_bymonth <- function(.type = c('open','endo')) {
   
   year_month_titles = lara_bymonth %>% names() %>% .[4:length(.)] %>% substr(start=2,stop=999) %>% as.factor()
   year_month_titles <- factor(year_month_titles, levels = year_month_titles)
+  year_month_titles_trimmed = year_month_titles[1:120]
   
-  names(lara_bymonth) <- lara_bymonth %>% names() %>% {c(.[1:3],
-                                                         .[4:length(.)]%>%substr(start=2,stop=999))}
-  lara_bymonth %<>%
-    mutate(TYPE = toupper(.type)) %>%
-    pivot_longer(cols = {names(.)[4:length(names(.))-1]}, names_to = 'PERIOD', values_to = 'VALUE') %>% 
-    mutate(PERIOD = factor(PERIOD, levels = year_month_titles)) %>% 
-    mutate(VALUE = VALUE %>% as.numeric())
+  names(lara_bymonth) <- lara_bymonth %>% names() %>% {c(.[1:3], .[4:length(.)]%>%substr(start=2,stop=999))}
+
+    lara_bymonth %<>%
+      pivot_longer(cols = {names(.)[4:length(names(.))]}, names_to = 'PERIOD', values_to = 'VALUE') %>% 
+      mutate(PERIOD = factor(PERIOD, levels = year_month_titles)) %>% 
+      mutate(VALUE = VALUE %>% as.numeric()) %>% 
+      mutate(TYPE = toupper(.type)) %>% 
+      mutate(POPULATION = POPULATION) %>% 
+      filter(PERIOD %in% year_month_titles_trimmed)
   
-  print(lara_bymonth)
+  return(lara_bymonth)
   
   varnames <- lara_bymonth %>% pull(VARIABLE) %>% unique()
   
-  lara_bymonth %<>%
-    # filter(VARIABLE %in% c(FREQUENCY,DEATHS)) %>%
-    pivot_wider(names_from = VARIABLE, values_from = VALUE) %>%
-    mutate(ALIVE = FREQUENCY - DEATHS) %>%
-    mutate(MORTALITY_ODDS = DEATHS / ALIVE) %>% 
-    pivot_longer(cols = all_of(c(varnames,'ALIVE','MORTALITY_ODDS')), names_to = 'VARIABLE', values_to = 'VALUE')  %>%
-    mutate(VARIABLE = as.factor(VARIABLE) %>% as.character(),
-           TYPE = as.factor(TYPE) %>% as.character(),
-           URGENCY = as.factor(URGENCY) %>% recode('ALL' = 'ALL URGENCY') %>% as.character(),
-           POPULATION = as.factor(POPULATION) %>% recode('GLOBAL' = 'ALL PEOPLE') %>% as.character())
-  
-  return(lara_bymonth)
+  # lara_bymonth %<>%
+  #   # filter(VARIABLE %in% c(FREQUENCY,DEATHS)) %>%
+  #   pivot_wider(names_from = VARIABLE, values_from = VALUE) #%>%
+  #   mutate(ALIVE = FREQUENCY - DEATHS) %>%
+  #   mutate(MORTALITY_ODDS = DEATHS / ALIVE) %>% 
+  #   pivot_longer(cols = all_of(c(varnames,'ALIVE','MORTALITY_ODDS')), names_to = 'VARIABLE', values_to = 'VALUE')  %>%
+  #   mutate(VARIABLE = as.factor(VARIABLE) %>% as.character(),
+  #          TYPE = as.factor(TYPE) %>% as.character(),
+  #          URGENCY = as.factor(URGENCY) %>% recode('ALL' = 'ALL URGENCY') %>% as.character(),
+  #          POPULATION = as.factor(POPULATION) %>% recode('GLOBAL' = 'ALL PEOPLE') %>% as.character())
+  # 
+  # return(lara_bymonth)
 }
 ```
 
@@ -279,6 +288,33 @@ calculate_odds_ratio <- function(.population, .urgency, .type, .variable, ref_pe
 }
 ```
 
+We now write a quick linear regression function, with output as one row in a table:
+```{r}
+lm_quick <- function(.data, .variable, .population, .urgency, .type, .predict){
+  reg <- .data %>% 
+    filter(VARIABLE %in% .variable) %>% 
+    filter(!is.na(PERIOD)) %>% 
+    filter(POPULATION %in% .population) %>% 
+    filter(URGENCY %in% .urgency) %>% 
+    filter(TYPE %in% .type) %>% 
+    mutate(TIME = as.integer(PERIOD)) %>%
+    {lm(VALUE ~ TIME,.)}
+  
+  output <- 
+    tribble(
+      ~VARIABLE, ~POPULATION, ~URGENCY, ~TYPE, ~Intercept, ~Coefficient,
+      .variable, .population, .urgency, .type, reg$coefficients %>% .['(Intercept)'], reg$coefficients %>% .['TIME']
+    )
+
+  if(is.numeric(.predict)) {
+    output %<>% add_column('Mar_2020' = predict(reg, list(TIME = 75)))
+  }
+  
+  return(output)
+}
+```
+
+
 # Analysis
 ## Import Data
 Lets now actually import both the open surgery and endovascular surgery data sets, and join them in one big table:
@@ -327,4 +363,377 @@ output %>%
            extra_css = "border-bottom: 1px solid")
 ```
 
+# Figures
+
+Let's now create the requested figures. First let's import the data in by month format, and add a third `TYPE` category combining `OPEN` and `ENDO` called `ALL`:
+```{r, warning=FALSE, message=FALSE}
+lara_bymonth <- bind_rows(import_bymonth('open'),
+                          import_bymonth('endo')) %>% 
+  pivot_wider(names_from = TYPE, values_from = VALUE) %>% 
+  mutate(ALL = OPEN + ENDO) %>% 
+  pivot_longer(cols = c('OPEN','ENDO','ALL'), names_to = 'TYPE') %>%
+  rename(VALUE = value)
+```
+## Figure 1. Case Frequency versus Time
+We create several figures which demonstrate frequency of surgeries over time:
+### Line Plot
+```{r, echo=FALSE}
+lara_bymonth %>%
+  filter(VARIABLE == 'FREQUENCY') %>%
+  filter(!is.na(PERIOD)) %>% 
+  filter(POPULATION == 'GLOBAL') %>% 
+  filter(URGENCY != 'ALL') %>% 
+  filter(TYPE != 'ALL') %>% 
+  group_by(URGENCY, TYPE) %>%
+  ggplot(aes(x=PERIOD, y=VALUE, colour = interaction(URGENCY,TYPE), group = interaction(URGENCY,TYPE))) +
+  geom_line() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  scale_x_discrete(breaks = unique(lara_bymonth$PERIOD)[seq(1, 123, by = 6)]) +
+  geom_vline(xintercept = "2020_Mar", linetype = "dashed", color = "black", size = 1) +
+  geom_vline(xintercept = "2023_Abr", linetype = "dashed", color = "black", size = 1) +
+  labs(x='Month',y='Frequency')
+```
+### Bar Chart, Stacked
+```{r, echo=FALSE}
+lara_bymonth %>%
+  filter(VARIABLE == 'FREQUENCY') %>%
+  filter(!is.na(PERIOD)) %>% 
+  filter(POPULATION == 'GLOBAL') %>% 
+  filter(URGENCY != 'ALL') %>% 
+  filter(TYPE != 'ALL') %>% 
+  group_by(URGENCY, TYPE) %>%
+  ggplot(aes(x=PERIOD, y=VALUE, fill = interaction(URGENCY,TYPE), group = interaction(URGENCY,TYPE))) +
+  geom_bar(position = 'stack', stat='identity') +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  scale_x_discrete(breaks = unique(lara_bymonth$PERIOD)[seq(1, 123, by = 6)]) +
+  geom_vline(xintercept = "2020_Mar", linetype = "dashed", color = "black", size = 1) +
+  geom_vline(xintercept = "2023_Abr", linetype = "dashed", color = "black", size = 1) +
+  labs(x='Month',y='Frequency')
+```
+
+### Bar Chart, Stacked, Normalized to 100%
+```{r, echo=FALSE}
+lara_bymonth %>%
+  filter(VARIABLE == 'FREQUENCY') %>%
+  filter(!is.na(PERIOD)) %>% 
+  filter(POPULATION == 'GLOBAL') %>% 
+  filter(URGENCY != 'ALL') %>% 
+  filter(TYPE != 'ALL') %>% 
+  group_by(URGENCY, TYPE) %>%
+  ggplot(aes(x=PERIOD, y=VALUE, fill = interaction(URGENCY,TYPE), group = interaction(URGENCY,TYPE))) +
+  geom_bar(position = 'fill', stat='identity') +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  scale_x_discrete(breaks = unique(lara_bymonth$PERIOD)[seq(1, 123, by = 6)]) +
+  geom_vline(xintercept = "2020_Mar", linetype = "dashed", color = "black", size = 1) +
+  geom_vline(xintercept = "2023_Abr", linetype = "dashed", color = "black", size = 1) +
+  labs(x='Month',y='Frequency')
+```
+### Scatter Plot, URGENCY, with smoothened average curve (LOESS)
+```{r, echo=FALSE}
+lara_bymonth %>%
+  filter(VARIABLE == 'FREQUENCY') %>%
+  filter(!is.na(PERIOD)) %>% 
+  filter(POPULATION == 'GLOBAL') %>% 
+  filter(TYPE == 'ALL') %>%
+  group_by(URGENCY) %>%
+  ggplot(aes(x=PERIOD, y=VALUE, colour = URGENCY, group = URGENCY)) +
+  geom_point() +
+  geom_smooth() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  scale_x_discrete(breaks = unique(lara_bymonth$PERIOD)[seq(1, 123, by = 6)]) +
+  geom_vline(xintercept = "2020_Mar", linetype = "dashed", color = "black", size = 1) +
+  geom_vline(xintercept = "2023_Abr", linetype = "dashed", color = "black", size = 1) +
+  labs(x='Month',y='Frequency')
+```
+### Scatter Plot, URGENCY, with linear regression fit and table of coefficients
+```{r, echo=FALSE, warning=FALSE}
+lara_bymonth %>%
+  filter(VARIABLE == 'FREQUENCY') %>%
+  filter(!is.na(PERIOD)) %>% 
+  filter(POPULATION == 'GLOBAL') %>% 
+  filter(TYPE == 'ALL') %>%
+  group_by(URGENCY) %>%
+  ggplot(aes(x=PERIOD, y=VALUE, colour = URGENCY, group = URGENCY)) +
+  geom_point() +
+  geom_smooth(formula = y ~ x, method = 'lm') +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  scale_x_discrete(breaks = unique(lara_bymonth$PERIOD)[seq(1, 123, by = 6)]) +
+  geom_vline(xintercept = "2020_Mar", linetype = "dashed", color = "black", size = 1) +
+  geom_vline(xintercept = "2023_Abr", linetype = "dashed", color = "black", size = 1) +
+  labs(x='Month',y='Frequency')
+
+expand.grid(list(.variable = 'FREQUENCY',
+                 .population = 'GLOBAL',
+                 .urgency = c('ALL','URGENT','ELECTIVE'),
+                 .type = c('ALL'),
+                 .predict = NA)) %>% 
+  pmap(lm_quick, .data=lara_bymonth) %>% 
+  bind_rows() %>% 
+  kbl() %>% 
+  kable_classic()
+```
+### Scatter Plot, URGENCY & TYPE, with smoothened average curve (LOESS)
+```{r, echo=FALSE}
+lara_bymonth %>%
+  filter(VARIABLE == 'FREQUENCY') %>%
+  filter(!is.na(PERIOD)) %>% 
+  filter(POPULATION == 'GLOBAL') %>% 
+  filter(URGENCY != 'ALL') %>%
+  filter(TYPE != 'ALL') %>% 
+  group_by(URGENCY, TYPE) %>%
+  ggplot(aes(x=PERIOD, y=VALUE, colour = interaction(URGENCY,TYPE), group = interaction(URGENCY,TYPE))) +
+  geom_point() +
+  geom_smooth(formula = y ~ x, method = 'loess') +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  scale_x_discrete(breaks = unique(lara_bymonth$PERIOD)[seq(1, 123, by = 6)]) +
+  geom_vline(xintercept = "2020_Mar", linetype = "dashed", color = "black", size = 1) +
+  geom_vline(xintercept = "2023_Abr", linetype = "dashed", color = "black", size = 1) +
+  labs(x='Month',y='Frequency')
+```
+```{r, echo=FALSE}
+lara_bymonth %>%
+  filter(VARIABLE == 'FREQUENCY') %>%
+  filter(!is.na(PERIOD)) %>% 
+  filter(POPULATION == 'GLOBAL') %>% 
+  filter(URGENCY == 'ALL') %>%
+  filter(TYPE != 'ALL') %>% 
+  group_by(URGENCY, TYPE) %>%
+  ggplot(aes(x=PERIOD, y=VALUE, colour = TYPE, group = TYPE)) +
+  geom_point() +
+  geom_smooth(formula = y ~ x, method = 'loess') +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  scale_x_discrete(breaks = unique(lara_bymonth$PERIOD)[seq(1, 123, by = 6)]) +
+  geom_vline(xintercept = "2020_Mar", linetype = "dashed", color = "black", size = 1) +
+  geom_vline(xintercept = "2023_Abr", linetype = "dashed", color = "black", size = 1) +
+  labs(x='Month',y='Frequency')
+```
+### Scatter Plot, URGENCY & TYPE, with linear regression fit and table of coefficients
+```{r, echo=FALSE}
+lara_bymonth %>%
+  filter(VARIABLE == 'FREQUENCY') %>%
+  filter(!is.na(PERIOD)) %>% 
+  filter(POPULATION == 'GLOBAL') %>% 
+  filter(URGENCY != 'ALL') %>% 
+  filter(TYPE %in% c('ENDO','OPEN')) %>% 
+  group_by(URGENCY, TYPE) %>%
+  ggplot(aes(x=PERIOD, y=VALUE, colour = interaction(URGENCY,TYPE), group = interaction(URGENCY,TYPE))) +
+  geom_point() +
+  geom_smooth(formula = y ~ x, method = 'lm') +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  scale_x_discrete(breaks = unique(lara_bymonth$PERIOD)[seq(1, 123, by = 6)]) +
+  geom_vline(xintercept = "2020_Mar", linetype = "dashed", color = "black", size = 1) +
+  geom_vline(xintercept = "2023_Abr", linetype = "dashed", color = "black", size = 1) +
+  labs(x='Month',y='Frequency')
+
+expand.grid(list(.variable = 'FREQUENCY',
+                 .population = 'GLOBAL',
+                 .urgency = c('URGENT','ELECTIVE'),
+                 .type = c('ENDO','OPEN'),
+                 .predict = NA)) %>% 
+  pmap(lm_quick, .data=lara_bymonth) %>% 
+  bind_rows() %>% 
+  kbl() %>% 
+  kable_classic()
+```
+
+```{r,echo=FALSE}
+lara_bymonth %>%
+  filter(VARIABLE == 'FREQUENCY') %>%
+  filter(!is.na(PERIOD)) %>% 
+  filter(POPULATION == 'GLOBAL') %>% 
+  filter(URGENCY == 'ALL') %>% 
+  filter(TYPE != 'ALL') %>% 
+  group_by(URGENCY, TYPE) %>%
+  ggplot(aes(x=PERIOD, y=VALUE, colour = TYPE, group = TYPE)) +
+  geom_point() +
+  geom_smooth(formula = y ~ x, method = 'lm') +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  scale_x_discrete(breaks = unique(lara_bymonth$PERIOD)[seq(1, 123, by = 6)]) +
+  geom_vline(xintercept = "2020_Mar", linetype = "dashed", color = "black", size = 1) +
+  geom_vline(xintercept = "2023_Abr", linetype = "dashed", color = "black", size = 1) +
+  labs(x='Month',y='Frequency')
+
+expand.grid(list(.variable = 'FREQUENCY',
+                 .population = 'GLOBAL',
+                 .urgency = 'ALL',
+                 .type = c('ENDO','OPEN'),
+                 .predict = NA)) %>% 
+  pmap(lm_quick, .data=lara_bymonth) %>% 
+  bind_rows() %>% 
+  kbl() %>% 
+  kable_classic()
+```
+### Regression Discontinuity Analysis, URGENCY & TYPE
+Here we look at regressions on each side of the COVID pandemic start date and examine for discontinuities. First we examine data for both `URGENCY` and `TYPE`: 
+```{r, echo=FALSE, message=FALSE, results=FALSE, warning=FALSE, include=TRUE}
+lara_bymonth %>%
+  filter(VARIABLE == 'FREQUENCY') %>%
+  filter(!is.na(PERIOD)) %>% 
+  filter(POPULATION == 'GLOBAL') %>% 
+  filter(URGENCY != 'ALL') %>% 
+  filter(TYPE != 'ALL') %>% 
+  group_by(URGENCY, TYPE) %>%
+  {ggplot(.,aes(x=PERIOD, y=VALUE, colour = interaction(URGENCY,TYPE), group = interaction(URGENCY,TYPE))) +
+  geom_point() +
+  geom_smooth(data = subset(., as.integer(PERIOD) < 75 & as.integer(PERIOD) > 75 - invisible(IKbandwidth(X = as.integer(PERIOD), Y = VALUE, cutpoint = 75, verbose = T, kernel = "triangular"))), formula = y ~ x, method = 'lm') +
+  geom_smooth(data = subset(., as.integer(PERIOD) > 75 & as.integer(PERIOD) < 75 + invisible(IKbandwidth(X = as.integer(PERIOD), Y = VALUE, cutpoint = 75, verbose = T, kernel = "triangular"))), formula = y ~ x, method = 'lm') +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  scale_x_discrete(breaks = unique(lara_bymonth$PERIOD)[seq(1, 123, by = 6)]) +
+  geom_vline(xintercept = "2020_Mar", linetype = "dashed", color = "black", size = 1) +
+  geom_vline(xintercept = "2023_Abr", linetype = "dashed", color = "black", size = 1) +
+  labs(x='Month',y='Frequency')}
+
+invisible(c(
+  expand.grid(list(.variable = 'FREQUENCY',
+                 .population = 'GLOBAL',
+                 .urgency = c('URGENT','ELECTIVE'),
+                 .type = c('OPEN','ENDO'),
+                 .predict = 75)) %>% 
+  pmap(lm_quick, .data=subset(lara_bymonth, as.integer(PERIOD) < 75 & as.integer(PERIOD) > 75 - IKbandwidth(X = as.integer(PERIOD), Y = VALUE, cutpoint = 75, verbose = T, kernel = "triangular"))),
+  expand.grid(list(.variable = 'FREQUENCY',
+                 .population = 'GLOBAL',
+                 .urgency = c('URGENT','ELECTIVE'),
+                 .type = c('OPEN','ENDO'),
+                 .predict = 75)) %>% 
+  pmap(lm_quick, .data=subset(lara_bymonth, as.integer(PERIOD) > 75 & as.integer(PERIOD) < 75 + IKbandwidth(X = as.integer(PERIOD), Y = VALUE, cutpoint = 75, verbose = T, kernel = "triangular")))
+  )) %>% 
+  bind_rows() %>%
+  add_column(PERIOD = c(rep('PRE',4),rep('POST',4)), .after = 'TYPE') %>% 
+  kbl() %>% 
+  kable_classic()
+```
+### Regression Discontinuity Analysis, URGENCY
+```{r, echo=FALSE}
+lara_bymonth %>%
+  filter(VARIABLE == 'FREQUENCY') %>%
+  filter(!is.na(PERIOD)) %>% 
+  filter(POPULATION == 'GLOBAL') %>% 
+  filter(URGENCY != 'ALL') %>% 
+  filter(TYPE == 'ALL') %>% 
+  group_by(URGENCY, TYPE) %>%
+  {ggplot(.,aes(x=PERIOD, y=VALUE, colour = URGENCY, group = URGENCY)) +
+  geom_point() +
+  geom_smooth(data = subset(., as.integer(PERIOD) < 75 & as.integer(PERIOD) > 75 - IKbandwidth(X = as.integer(PERIOD), Y = VALUE, cutpoint = 75, verbose = T, kernel = "triangular")), formula = y ~ x, method = 'lm') +
+  geom_smooth(data = subset(., as.integer(PERIOD) > 75 & as.integer(PERIOD) < 75 + IKbandwidth(X = as.integer(PERIOD), Y = VALUE, cutpoint = 75, verbose = T, kernel = "triangular")), formula = y ~ x, method = 'lm') +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  scale_x_discrete(breaks = unique(lara_bymonth$PERIOD)[seq(1, 123, by = 6)]) +
+  geom_vline(xintercept = "2020_Mar", linetype = "dashed", color = "black", size = 1) +
+  geom_vline(xintercept = "2023_Abr", linetype = "dashed", color = "black", size = 1) +
+  labs(x='Month',y='Frequency')}
+
+c(
+  expand.grid(list(.variable = 'FREQUENCY',
+                 .population = 'GLOBAL',
+                 .urgency = c('URGENT','ELECTIVE'),
+                 .type = 'ALL',
+                 .predict = 75)) %>% 
+  pmap(lm_quick, .data=subset(lara_bymonth, as.integer(PERIOD) < 75 & as.integer(PERIOD) > 75 - IKbandwidth(X = as.integer(PERIOD), Y = VALUE, cutpoint = 75, verbose = T, kernel = "triangular"))),
+  expand.grid(list(.variable = 'FREQUENCY',
+                 .population = 'GLOBAL',
+                 .urgency = c('URGENT','ELECTIVE'),
+                 .type = 'ALL',
+                 .predict = 75)) %>% 
+  pmap(lm_quick, .data=subset(lara_bymonth, as.integer(PERIOD) > 75 & as.integer(PERIOD) < 75 + IKbandwidth(X = as.integer(PERIOD), Y = VALUE, cutpoint = 75, verbose = T, kernel = "triangular")))
+  ) %>% 
+  bind_rows() %>%
+  add_column(PERIOD = c('PRE','PRE','POST','POST'), .after = 'TYPE') %>% 
+  kbl() %>% 
+  kable_classic()
+```
+
+
+## Figure 2. 30-Day Mortality versus Time
+```{r, echo=FALSE}
+lara_bymonth %>%
+  filter(VARIABLE == 'MORTALITY') %>%
+  filter(!is.na(PERIOD)) %>% 
+  filter(POPULATION == 'GLOBAL') %>% 
+  filter(URGENCY != 'ALL') %>% 
+  group_by(URGENCY, TYPE) %>%
+  ggplot(aes(x=PERIOD, y=VALUE/100, colour = interaction(URGENCY,TYPE), group = interaction(URGENCY,TYPE))) +
+  geom_line() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  scale_x_discrete(breaks = unique(lara_bymonth$PERIOD)[seq(1, 123, by = 6)]) +
+  geom_vline(xintercept = "2020_Mar", linetype = "dashed", color = "black", size = 1) +
+  geom_vline(xintercept = "2023_Abr", linetype = "dashed", color = "black", size = 1) +
+  labs(x='Month',y='Mortality')
+```
+
+## Figure 3. Case Frequency versus Time By Population Subgroup
+```{r, echo=FALSE}
+lara_bymonth %>%
+  filter(VARIABLE == 'FREQUENCY') %>%
+  filter(!is.na(PERIOD)) %>% 
+  filter(POPULATION != 'GLOBAL') %>% 
+  filter(URGENCY != 'ALL') %>% 
+  group_by(URGENCY, TYPE) %>%
+  ggplot(aes(x=PERIOD, y=VALUE/100, colour = interaction(POPULATION), group = interaction(POPULATION))) +
+  geom_line() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  scale_x_discrete(breaks = unique(lara_bymonth$PERIOD)[seq(1, 123, by = 6)]) +
+  geom_vline(xintercept = "2020_Mar", linetype = "dashed", color = "black", size = 1) +
+  geom_vline(xintercept = "2023_Abr", linetype = "dashed", color = "black", size = 1) +
+  labs(x='Month',y='Mortality')
+```
+
+## Figure 4. Mortality by Population Subgroup, 2014-2023
+```{r, echo=FALSE}
+lara_bymonth %>% 
+  filter(VARIABLE %in% c('FREQUENCY','DEATHS')) %>% 
+  filter(URGENCY != 'ALL') %>% 
+  filter(POPULATION %in% c('GLOBAL','WHITE','BLACK','"PARDA"','MALE','FEMALE')) %>% 
+  mutate(VALUE = if_else(is.na(VALUE), 0, VALUE)) %>% 
+  group_by(POPULATION, URGENCY, TYPE, VARIABLE) %>% 
+  summarise(TOTAL = sum(VALUE)) %>%
+  pivot_wider(names_from = VARIABLE, values_from = TOTAL) %>% 
+  mutate(MORTALITY = DEATHS/FREQUENCY) %>% 
+  ggplot() +
+  geom_col(aes(x=interaction(POPULATION, URGENCY, TYPE), y=MORTALITY)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(x='Group',y='Mortality')
+```
+
+## Figure 5. Endo versus Open Repair by Population Subgroup, 2014-2023
+```{r}
+lara_bymonth %>% 
+  filter(VARIABLE %in% c('FREQUENCY')) %>% 
+  filter(URGENCY != 'ALL') %>% 
+  filter(POPULATION %in% c('GLOBAL','WHITE','BLACK','"PARDA"','MALE','FEMALE')) %>% 
+  mutate(VALUE = if_else(is.na(VALUE), 0, VALUE)) %>% 
+  group_by(POPULATION, URGENCY, TYPE, VARIABLE) %>% 
+  summarise(TOTAL = sum(VALUE)) %>%
+  # pivot_wider(names_from = TYPE, values_from = TOTAL) %>%
+  # mutate(TOTAL = ENDO + OPEN) %>%
+  # mutate(pENDO = ENDO / TOTAL) %>% 
+  # mutate(pOPEN = OPEN / TOTAL) %>% 
+  ggplot(aes(fill = TYPE, x=interaction(POPULATION, URGENCY), y=TOTAL)) +
+  geom_bar(position = 'fill', stat='identity') +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(x='Group',y='Proportion')
+```
+
+## Figure 6. Mortality Before and After COVID
+```{r, echo=FALSE}
+year_month_titles <- lara_bymonth %>% pull(PERIOD) %>% unique()
+
+lara_bymonth %>%
+  filter(VARIABLE %in% c('DEATHS','FREQUENCY')) %>%
+  filter(!is.na(PERIOD)) %>%
+  filter(POPULATION == 'GLOBAL') %>%
+  filter(URGENCY != 'ALL') %>%
+  mutate(AFTER_COVID = (as.integer(PERIOD) >= as.integer(year_month_titles[75]))) %>% #[75] == 'Mar_2020'
+  mutate(VALUE = if_else(is.na(VALUE), 0, VALUE)) %>% 
+  group_by(URGENCY, TYPE, AFTER_COVID, VARIABLE) %>%
+  summarise(TOTAL = sum(VALUE)) %>%
+  pivot_wider(names_from = VARIABLE, values_from = TOTAL) %>% 
+  mutate(MORTALITY = DEATHS/FREQUENCY) %>%  
+  print() %>% 
+  ggplot(aes(x=interaction(URGENCY,TYPE,AFTER_COVID), y=MORTALITY, fill = interaction(URGENCY,TYPE,AFTER_COVID))) +
+  geom_col() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  scale_x_discrete(breaks = unique(lara_bymonth$PERIOD)[seq(1, 123, by = 6)]) +
+  geom_vline(xintercept = "2020_Mar", linetype = "dashed", color = "black", size = 1) +
+  geom_vline(xintercept = "2023_Abr", linetype = "dashed", color = "black", size = 1) +
+  labs(x='Subgroup',y='Mortality')
+```
 
