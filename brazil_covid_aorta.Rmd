@@ -5,6 +5,7 @@ date: "8/15/2024 - 9/23/2024"
 output: html_notebook
 ---
 
+
 # Motivation
 In this R notebook, we look at data on outcomes after aortic surgery in Brazil before and after the COVID-19 pandemic. Data used here is obtained from the Brazilian public health system which captures roughly ~70% of the Brazilian population. We investigate whether the COVID-19 pandemic adversely affected outcomes after aortic surgery during and after the pandemic.
 
