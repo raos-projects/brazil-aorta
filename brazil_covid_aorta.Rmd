@@ -12,7 +12,7 @@ In this R notebook, we look at data on outcomes after aortic surgery in Brazil b
 # Setup
 ## Libraries
 Import the necessary libraries:
-```{r, message=FALSE}
+```{r, message=FALSE, warning=FALSE}
 library(dplyr)
 library(magrittr)
 library(purrr)
@@ -24,7 +24,8 @@ library(kableExtra)
 library(blscrapeR)
 library(ggplot2)
 library(tibble)
-library(rdd)
+library(rdd) # no longer in implementation, now using `rdrobust`
+library(rdrobust)
 ```
 ## Data
 We define a function to help us import the data:
@@ -386,12 +387,12 @@ Utility function for generating linear models, either for summarizing linear res
 lm_quick <- function(.data, .variable, .population, .urgency, .type, .predict){
   
   # use `rdd` package to determine best fit regressions on each side of the discontinuity.
-  # N.B. this now deprecated in favor of manual calculation of IK bandwidth, p-values, etc.
+  # N.B. this now deprecated in favor of the `rdrobust` implementation `lm_quick_rdrobust`
   lm_quick_rdd <- function(.data, .variable, .population, .urgency, .type, .predict) {
     
     .data %<>% quick_filter(.variable, .population, .urgency, .type)
     
-    rd_model <- RDestimate(VALUE ~ TIME, data = .data, cutpoint = .predict, model = TRUE, kernel = 'rectangular')
+    rd_model <- RDestimate(VALUE ~ TIME, data = .data, cutpoint = .predict, kernel = 'uniform')
     
     intercept <- rd_model$model[[1]]$coefficients[["(Intercept)"]]
     treatment_effect <- rd_model$model[[1]]$coefficients[["Tr"]]
@@ -416,7 +417,90 @@ lm_quick <- function(.data, .variable, .population, .urgency, .type, .predict){
         .variable, .population, .urgency, .type, intercept_right, slope_right, 'POST', treatment_effect, p_value ,IKB
       )
 
-    return(list(row = output_table, newdata = .data, ikb = IKB))
+    return(list(row = output_table, newdata = .data, bw = IKB))
+  }
+  
+  # use `rdrobust` package to determine best fit regressions on each side of the continuity.
+  # this is the preferred method within `lm_quick` given the calculation of bias corrected
+  # and robust inference measures in the `rdrobust` package. Predicted values and standard
+  # errors of those predictions are returned so that regression lines may be plotted with
+  # confidence intervals shaded similar to geom_smooth(method = 'lm')
+  lm_quick_rdrobust <- function(.data, .variable, .population, .urgency, .type, .predict) {
+    
+    .data %<>% quick_filter(.variable, .population, .urgency, .type)
+    
+    rd_model <- rdrobust(y = .data$VALUE, x = .data$TIME, c = .predict, p = 1, kernel = 'uniform')
+    
+    rd_bandwidth = rd_model$bws[[1,1]]
+    tau_cl = rd_model$Estimate[[1]]
+    tau_bc = rd_model$Estimate[[2]]
+    
+    cutoff_left = rd_model$beta_Y_p_l[[1]]
+    slope_left = rd_model$beta_Y_p_l[[2]]
+    intercept_left = cutoff_left - slope_left*.predict
+    time_left = seq(ceiling(.predict - rd_bandwidth), .predict-1)
+    period_left = .data$PERIOD[time_left]
+    
+    cutoff_right = rd_model$beta_Y_p_r[[1]]
+    slope_right = rd_model$beta_Y_p_r[[2]]
+    intercept_right = cutoff_right - slope_right*.predict
+    time_right = seq(.predict, floor(.predict + rd_bandwidth))
+    period_right = .data$PERIOD[time_right]
+    
+    p_value_cl <- rd_model$pv[[1]]
+    p_value_bc <- rd_model$pv[[2]]
+    p_value_robust <- rd_model$pv[[3]]
+    
+    lm_left = lm(VALUE ~ TIME, data = .data %>% subset(TIME > .predict - rd_bandwidth & TIME < .predict))
+    lm_right = lm(VALUE ~ TIME, data = .data %>% subset(TIME < .predict + rd_bandwidth & TIME >= .predict))
+    
+    .pred_left <-
+      predict(lm_left, newdata = data.frame(TIME = seq(ceiling(.predict - rd_bandwidth), .predict-1)), se.fit = TRUE) %>% 
+      {data.frame(TIME = time_left, PERIOD = period_left,
+                  VALUE = .$fit, LOWER = .$fit - 1.96*.$se.fit, UPPER = .$fit + 1.96*.$se.fit,
+                  URGENCY = .urgency, TYPE = .type, POPULATION = .population, VARIABLE = .variable)}
+    .pred_right <- 
+      predict(lm_right, newdata = data.frame(TIME = seq(.predict,floor(.predict + rd_bandwidth))), se.fit = TRUE) %>% 
+      {data.frame(TIME = time_right, PERIOD = period_right,
+                  VALUE = .$fit, LOWER = .$fit - 1.96*.$se.fit, UPPER = .$fit + 1.96*.$se.fit,
+                  URGENCY = .urgency, TYPE = .type, POPULATION = .population, VARIABLE = .variable)}
+    
+    output_table <-
+      tribble(
+        ~VARIABLE, ~POPULATION, ~URGENCY, ~TYPE, ~Intercept, ~Coefficient, ~PERIOD, ~τ_conv, ~PV_conv, ~τ_bc, ~PV_bc, ~PV_robust, ~BANDWIDTH,
+        .variable, .population, .urgency, .type, intercept_left, slope_left, 'PRE', NA, NA, NA, NA, NA, rd_bandwidth,
+        .variable, .population, .urgency, .type, intercept_right, slope_right, 'POST', tau_cl, p_value_cl, tau_bc, p_value_bc, p_value_robust ,rd_bandwidth
+      )
+
+    return(list(row = output_table, newdata = .data, bw = rd_bandwidth, pred_left = .pred_left, pred_right = .pred_right))
+  }
+  
+  # use base R 'lm' function and IKbandwidth from `rdd` to manually calculate best fit regressions
+  # on each side of the continuity. This is deprecated now that we use the `rdrobust` package to
+  # calculate bias corrected and robust inference measures (see `lm_quick_rdrobust`)
+  lm_quick_manual <- function(.data, .variable, .population, .urgency, .type, .predict) {
+    .data %<>% quick_filter(.variable, .population, .urgency, .type)
+    
+    .ikb = IKbandwidth(.data$TIME, .data$VALUE, cutpoint = 75, kernel = 'rectangular')
+    
+    lm_left <- .data %>% subset(TIME < 75 & TIME > 75 - .ikb) %>%
+      lm_quick_core(.variable, .population, .urgency, .type)
+    
+    lm_right <- .data %>% subset(TIME > 75 & TIME < 75 + .ikb) %>%
+      lm_quick_core(.variable, .population, .urgency, .type)
+    
+    pred_left = predict(lm_left$model, newdata = data.frame(TIME = .predict), se.fit = TRUE)
+    pred_right = predict(lm_right$model, newdata = data.frame(TIME = .predict), se.fit = TRUE)
+    
+    treatment_effect = pred_right$fit - pred_left$fit
+    se_treatment_effect = sqrt(pred_right$se.fit^2 + pred_left$se.fit^2)
+    z_value = treatment_effect / se_treatment_effect
+    p_value <- 2 * (1 - pnorm(abs(z_value)))
+    
+    lm_left$row %<>% mutate(TREATMENT_EFFECT = NA, P.VALUE = NA, IK.BANDWIDTH = .ikb)
+    lm_right$row %<>% mutate(TREATMENT_EFFECT = treatment_effect, P.VALUE = p_value, IK.BANDWIDTH = .ikb)
+    
+    return(list(row = bind_rows(lm_left$row, lm_right$row), newdata = .data, ikb = .ikb))
   }
   
   # run a basic OLS regression after filtering on the given parameters
@@ -441,30 +525,7 @@ lm_quick <- function(.data, .variable, .population, .urgency, .type, .predict){
   }
   
   if(is.numeric(.predict)) {
-    
-    .data %<>% quick_filter(.variable, .population, .urgency, .type)
-    
-    .ikb = IKbandwidth(.data$TIME, .data$VALUE, cutpoint = 75, kernel = 'rectangular')
-    
-    lm_left <- .data %>% subset(TIME < 75 & TIME > 75 - .ikb) %>%
-      lm_quick_core(.variable, .population, .urgency, .type)
-    
-    lm_right <- .data %>% subset(TIME > 75 & TIME < 75 + .ikb) %>%
-      lm_quick_core(.variable, .population, .urgency, .type)
-    
-    pred_left = predict(lm_left$model, newdata = data.frame(TIME = .predict), se.fit = TRUE)
-    pred_right = predict(lm_right$model, newdata = data.frame(TIME = .predict), se.fit = TRUE)
-    
-    treatment_effect = pred_right$fit - pred_left$fit
-    se_treatment_effect = sqrt(pred_right$se.fit^2 + pred_left$se.fit^2)
-    z_value = treatment_effect / se_treatment_effect
-    p_value <- 2 * (1 - pnorm(abs(z_value)))
-    
-    lm_left$row %<>% mutate(TREATMENT_EFFECT = NA, P.VALUE = NA, IK.BANDWIDTH = .ikb)
-    lm_right$row %<>% mutate(TREATMENT_EFFECT = treatment_effect, P.VALUE = p_value, IK.BANDWIDTH = .ikb)
-    
-    return(list(row = bind_rows(lm_left$row, lm_right$row), newdata = .data, ikb = .ikb))
-    # return(lm_quick_rdd(.data, .variable, .population, .urgency, .type, .predict))
+    return(lm_quick_rdrobust(.data, .variable, .population, .urgency, .type, .predict))
   } else {
     return(lm_quick_core(.data, .variable, .population, .urgency, .type) %>% .[['row']])
   }
@@ -779,49 +840,65 @@ cleanup()
 lara_bymonth_urgent_all = lara_bymonth %>%
   lm_quick('FREQUENCY','GLOBAL','URGENT','ALL',75)
 table_row_urgent_all = lara_bymonth_urgent_all[['row']]
-IKB_urgent_all = lara_bymonth_urgent_all[['ikb']]
+BW_urgent_all = lara_bymonth_urgent_all[['bw']]
+pred_left_urgent_all = lara_bymonth_urgent_all[['pred_left']]
+pred_right_urgent_all = lara_bymonth_urgent_all[['pred_right']]
 lara_bymonth_urgent_all = lara_bymonth_urgent_all[['newdata']]
 
 lara_bymonth_elective_all = lara_bymonth %>%
   lm_quick('FREQUENCY','GLOBAL','ELECTIVE','ALL',75)
 table_row_elective_all = lara_bymonth_elective_all[['row']]
-IKB_elective_all = lara_bymonth_elective_all[['ikb']]
+BW_elective_all = lara_bymonth_elective_all[['bw']]
+pred_left_elective_all = lara_bymonth_elective_all[['pred_left']]
+pred_right_elective_all = lara_bymonth_elective_all[['pred_right']]
 lara_bymonth_elective_all = lara_bymonth_elective_all[['newdata']]
 
 lara_bymonth_urgent_open = lara_bymonth %>%
   lm_quick('FREQUENCY','GLOBAL','URGENT','OPEN',75)
 table_row_urgent_open = lara_bymonth_urgent_open[['row']]
-IKB_urgent_open = lara_bymonth_urgent_open[['ikb']]
+BW_urgent_open = lara_bymonth_urgent_open[['bw']]
+pred_left_urgent_open = lara_bymonth_urgent_open[['pred_left']]
+pred_right_urgent_open = lara_bymonth_urgent_open[['pred_right']]
 lara_bymonth_urgent_open = lara_bymonth_urgent_open[['newdata']]
 
 lara_bymonth_elective_open = lara_bymonth %>%
   lm_quick('FREQUENCY','GLOBAL','ELECTIVE','OPEN',75)
 table_row_elective_open = lara_bymonth_elective_open[['row']]
-IKB_elective_open = lara_bymonth_elective_open[['ikb']]
+BW_elective_open = lara_bymonth_elective_open[['bw']]
+pred_left_elective_open = lara_bymonth_elective_open[['pred_left']]
+pred_right_elective_open = lara_bymonth_elective_open[['pred_right']]
 lara_bymonth_elective_open = lara_bymonth_elective_open[['newdata']]
 
 lara_bymonth_urgent_endo = lara_bymonth %>%
   lm_quick('FREQUENCY','GLOBAL','URGENT','ENDO',75)
 table_row_urgent_endo = lara_bymonth_urgent_endo[['row']]
-IKB_urgent_endo = lara_bymonth_urgent_endo[['ikb']]
+BW_urgent_endo = lara_bymonth_urgent_endo[['bw']]
+pred_left_urgent_endo = lara_bymonth_urgent_endo[['pred_left']]
+pred_right_urgent_endo = lara_bymonth_urgent_endo[['pred_right']]
 lara_bymonth_urgent_endo = lara_bymonth_urgent_endo[['newdata']]
 
 lara_bymonth_elective_endo = lara_bymonth %>%
   lm_quick('FREQUENCY','GLOBAL','ELECTIVE','ENDO',75)
 table_row_elective_endo = lara_bymonth_elective_endo[['row']]
-IKB_elective_endo = lara_bymonth_elective_endo[['ikb']]
+BW_elective_endo = lara_bymonth_elective_endo[['bw']]
+pred_left_elective_endo = lara_bymonth_elective_endo[['pred_left']]
+pred_right_elective_endo = lara_bymonth_elective_endo[['pred_right']]
 lara_bymonth_elective_endo = lara_bymonth_elective_endo[['newdata']]
 
 lara_bymonth_all_endo = lara_bymonth %>%
   lm_quick('FREQUENCY','GLOBAL','ALL','ENDO',75)
 table_row_all_endo = lara_bymonth_all_endo[['row']]
-IKB_all_endo = lara_bymonth_all_endo[['ikb']]
+BW_all_endo = lara_bymonth_all_endo[['bw']]
+pred_left_all_endo = lara_bymonth_all_endo[['pred_left']]
+pred_right_all_endo = lara_bymonth_all_endo[['pred_right']]
 lara_bymonth_all_endo = lara_bymonth_all_endo[['newdata']]
 
 lara_bymonth_all_open = lara_bymonth %>%
   lm_quick('FREQUENCY','GLOBAL','ALL','OPEN',75)
 table_row_all_open = lara_bymonth_all_open[['row']]
-IKB_all_open = lara_bymonth_all_open[['ikb']]
+BW_all_open = lara_bymonth_all_open[['bw']]
+pred_left_all_open = lara_bymonth_all_open[['pred_left']]
+pred_right_all_open = lara_bymonth_all_open[['pred_right']]
 lara_bymonth_all_open = lara_bymonth_all_open[['newdata']]
 
 # simple LOESS over the entire study period, URGENCY and TYPE combos
@@ -855,16 +932,28 @@ expand_grid(.variable = 'FREQUENCY',
   kable_classic()
 
 # regression discontinuity limited to IK bandwidth about the cut point, URGENCY and TYPE combos
+total_preds_left = bind_rows(
+  pred_left_urgent_open, pred_left_urgent_endo, pred_left_elective_open, pred_left_elective_endo
+  )
+
+total_preds_right = bind_rows(
+  pred_right_urgent_open, pred_right_urgent_endo, pred_right_elective_open, pred_right_elective_endo
+  )
+
 ggplot() +
   geom_point(data = bind_rows(lara_bymonth_urgent_open, lara_bymonth_elective_open, lara_bymonth_urgent_endo, lara_bymonth_elective_endo), aes(x=PERIOD, y=VALUE, colour = interaction(URGENCY,TYPE), group = interaction(URGENCY,TYPE))) +
-  geom_smooth(data = subset(lara_bymonth_urgent_open, TIME < 75 & TIME > 75 - IKB_urgent_open), aes(x=TIME, y=VALUE, color=interaction(URGENCY,TYPE)), formula = y ~ x, method = 'lm') +
-  geom_smooth(data = subset(lara_bymonth_urgent_open, TIME > 75 & TIME < 75 + IKB_urgent_open), aes(x=TIME, y=VALUE, color=interaction(URGENCY,TYPE)), formula = y ~ x, method = 'lm') +
-  geom_smooth(data = subset(lara_bymonth_urgent_endo, TIME < 75 & TIME > 75 - IKB_urgent_endo), aes(x=TIME, y=VALUE, color=interaction(URGENCY,TYPE)), formula = y ~ x, method = 'lm') +
-  geom_smooth(data = subset(lara_bymonth_urgent_endo, TIME > 75 & TIME < 75 + IKB_urgent_endo), aes(x=TIME, y=VALUE, color=interaction(URGENCY,TYPE)), formula = y ~ x, method = 'lm') +
-  geom_smooth(data = subset(lara_bymonth_elective_open, TIME < 75 & TIME > 75 - IKB_elective_open), aes(x=TIME, y=VALUE, color=interaction(URGENCY,TYPE)), formula = y ~ x, method = 'lm') +
-  geom_smooth(data = subset(lara_bymonth_elective_open, TIME > 75 & TIME < 75 + IKB_elective_open), aes(x=TIME, y=VALUE, color=interaction(URGENCY,TYPE)), formula = y ~ x, method = 'lm') +
-  geom_smooth(data = subset(lara_bymonth_elective_endo, TIME < 75 & TIME > 75 - IKB_elective_endo), aes(x=TIME, y=VALUE, color=interaction(URGENCY,TYPE)), formula = y ~ x, method = 'lm') +
-  geom_smooth(data = subset(lara_bymonth_elective_endo, TIME > 75 & TIME < 75 + IKB_elective_endo), aes(x=TIME, y=VALUE, color=interaction(URGENCY,TYPE)), formula = y ~ x, method = 'lm') +
+  geom_line(data = total_preds_left, aes(x = PERIOD, y = VALUE, color = interaction(URGENCY,TYPE), group = interaction(URGENCY,TYPE))) +
+  geom_ribbon(data = total_preds_left, aes(x = PERIOD, ymin = LOWER, ymax = UPPER), alpha = 0.2, color = 'gray', group = interaction(URGENCY,TYPE)) +
+  geom_line(data = total_preds_right, aes(x = PERIOD, y = VALUE, color = interaction(URGENCY,TYPE), group = interaction(URGENCY,TYPE))) +
+  geom_ribbon(data = total_preds_right, aes(x = PERIOD, ymin = LOWER, ymax = UPPER), alpha = 0.2, color = 'gray', group = interaction(URGENCY,TYPE)) +
+  # geom_smooth(data = subset(lara_bymonth_urgent_open, TIME < 75 & TIME > 75 - IKB_urgent_open), aes(x=TIME, y=VALUE, color=interaction(URGENCY,TYPE)), formula = y ~ x, method = 'lm') +
+  # geom_smooth(data = subset(lara_bymonth_urgent_open, TIME > 75 & TIME < 75 + IKB_urgent_open), aes(x=TIME, y=VALUE, color=interaction(URGENCY,TYPE)), formula = y ~ x, method = 'lm') +
+  # geom_smooth(data = subset(lara_bymonth_urgent_endo, TIME < 75 & TIME > 75 - IKB_urgent_endo), aes(x=TIME, y=VALUE, color=interaction(URGENCY,TYPE)), formula = y ~ x, method = 'lm') +
+  # geom_smooth(data = subset(lara_bymonth_urgent_endo, TIME > 75 & TIME < 75 + IKB_urgent_endo), aes(x=TIME, y=VALUE, color=interaction(URGENCY,TYPE)), formula = y ~ x, method = 'lm') +
+  # geom_smooth(data = subset(lara_bymonth_elective_open, TIME < 75 & TIME > 75 - IKB_elective_open), aes(x=TIME, y=VALUE, color=interaction(URGENCY,TYPE)), formula = y ~ x, method = 'lm') +
+  # geom_smooth(data = subset(lara_bymonth_elective_open, TIME > 75 & TIME < 75 + IKB_elective_open), aes(x=TIME, y=VALUE, color=interaction(URGENCY,TYPE)), formula = y ~ x, method = 'lm') +
+  # geom_smooth(data = subset(lara_bymonth_elective_endo, TIME < 75 & TIME > 75 - IKB_elective_endo), aes(x=TIME, y=VALUE, color=interaction(URGENCY,TYPE)), formula = y ~ x, method = 'lm') +
+  # geom_smooth(data = subset(lara_bymonth_elective_endo, TIME > 75 & TIME < 75 + IKB_elective_endo), aes(x=TIME, y=VALUE, color=interaction(URGENCY,TYPE)), formula = y ~ x, method = 'lm') +
   theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
   scale_x_discrete(breaks = unique(lara_bymonth$PERIOD)[seq(1, 123, by = 6)]) +
   geom_vline(xintercept = "2020_Mar", linetype = "dashed", color = "black", size = 1) +
@@ -909,10 +998,10 @@ ggplot() +
 # regression discontinuity limited to IK bandwidth about the cut point, URGENCY with all TYPE
 ggplot() +
   geom_point(data = bind_rows(lara_bymonth_urgent_all, lara_bymonth_elective_all), aes(x=PERIOD, y=VALUE, colour = URGENCY, group = URGENCY)) +
-  geom_smooth(data = subset(lara_bymonth_urgent_all, TIME < 75 & TIME > 75 - IKB_urgent_all), aes(x=TIME, y=VALUE, color=URGENCY), formula = y ~ x, method = 'lm') +
-  geom_smooth(data = subset(lara_bymonth_urgent_all, TIME > 75 & TIME < 75 + IKB_urgent_all), aes(x=TIME, y=VALUE, color=URGENCY), formula = y ~ x, method = 'lm') +
-  geom_smooth(data = subset(lara_bymonth_elective_all, TIME < 75 & TIME > 75 - IKB_elective_all), aes(x=TIME, y=VALUE, color=URGENCY), formula = y ~ x, method = 'lm') +
-  geom_smooth(data = subset(lara_bymonth_elective_all, TIME > 75 & TIME < 75 + IKB_elective_all), aes(x=TIME, y=VALUE, color=URGENCY), formula = y ~ x, method = 'lm') +
+  # geom_smooth(data = subset(lara_bymonth_urgent_all, TIME < 75 & TIME > 75 - IKB_urgent_all), aes(x=TIME, y=VALUE, color=URGENCY), formula = y ~ x, method = 'lm') +
+  # geom_smooth(data = subset(lara_bymonth_urgent_all, TIME > 75 & TIME < 75 + IKB_urgent_all), aes(x=TIME, y=VALUE, color=URGENCY), formula = y ~ x, method = 'lm') +
+  # geom_smooth(data = subset(lara_bymonth_elective_all, TIME < 75 & TIME > 75 - IKB_elective_all), aes(x=TIME, y=VALUE, color=URGENCY), formula = y ~ x, method = 'lm') +
+  # geom_smooth(data = subset(lara_bymonth_elective_all, TIME > 75 & TIME < 75 + IKB_elective_all), aes(x=TIME, y=VALUE, color=URGENCY), formula = y ~ x, method = 'lm') +
   theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
   scale_x_discrete(breaks = unique(lara_bymonth$PERIOD)[seq(1, 123, by = 6)]) +
   geom_vline(xintercept = "2020_Mar", linetype = "dashed", color = "black", size = 1) +
@@ -957,10 +1046,10 @@ expand_grid(.variable = 'FREQUENCY',
 # regression discontinuity limited to IK bandwidth about the cut point, TYPE with all URGENCY
 ggplot() +
   geom_point(data = bind_rows(lara_bymonth_all_open, lara_bymonth_all_endo), aes(x=PERIOD, y=VALUE, colour = TYPE, group = TYPE)) +
-  geom_smooth(data = subset(lara_bymonth_all_open, TIME < 75 & TIME > 75 - IKB_all_open), aes(x=TIME, y=VALUE, color=TYPE), formula = y ~ x, method = 'lm') +
-  geom_smooth(data = subset(lara_bymonth_all_open, TIME > 75 & TIME < 75 + IKB_all_open), aes(x=TIME, y=VALUE, color=TYPE), formula = y ~ x, method = 'lm') +
-  geom_smooth(data = subset(lara_bymonth_all_endo, TIME < 75 & TIME > 75 - IKB_all_endo), aes(x=TIME, y=VALUE, color=TYPE), formula = y ~ x, method = 'lm') +
-  geom_smooth(data = subset(lara_bymonth_all_endo, TIME > 75 & TIME < 75 + IKB_all_endo), aes(x=TIME, y=VALUE, color=TYPE), formula = y ~ x, method = 'lm') +
+  # geom_smooth(data = subset(lara_bymonth_all_open, TIME < 75 & TIME > 75 - IKB_all_open), aes(x=TIME, y=VALUE, color=TYPE), formula = y ~ x, method = 'lm') +
+  # geom_smooth(data = subset(lara_bymonth_all_open, TIME > 75 & TIME < 75 + IKB_all_open), aes(x=TIME, y=VALUE, color=TYPE), formula = y ~ x, method = 'lm') +
+  # geom_smooth(data = subset(lara_bymonth_all_endo, TIME < 75 & TIME > 75 - IKB_all_endo), aes(x=TIME, y=VALUE, color=TYPE), formula = y ~ x, method = 'lm') +
+  # geom_smooth(data = subset(lara_bymonth_all_endo, TIME > 75 & TIME < 75 + IKB_all_endo), aes(x=TIME, y=VALUE, color=TYPE), formula = y ~ x, method = 'lm') +
   theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
   scale_x_discrete(breaks = unique(lara_bymonth$PERIOD)[seq(1, 123, by = 6)]) +
   geom_vline(xintercept = "2020_Mar", linetype = "dashed", color = "black", size = 1) +
@@ -1107,37 +1196,37 @@ cleanup()
 lara_bymonth_urgent_all = lara_bymonth %>%
   lm_quick('MORTALITY','GLOBAL','URGENT','ALL',75)
 table_row_urgent_all = lara_bymonth_urgent_all[['row']]
-IKB_urgent_all = lara_bymonth_urgent_all[['ikb']]
+IKB_urgent_all = lara_bymonth_urgent_all[['bw']]
 lara_bymonth_urgent_all = lara_bymonth_urgent_all[['newdata']]
 
 lara_bymonth_elective_all = lara_bymonth %>%
   lm_quick('MORTALITY','GLOBAL','ELECTIVE','ALL',75)
 table_row_elective_all = lara_bymonth_elective_all[['row']]
-IKB_elective_all = lara_bymonth_elective_all[['ikb']]
+IKB_elective_all = lara_bymonth_elective_all[['bw']]
 lara_bymonth_elective_all = lara_bymonth_elective_all[['newdata']]
 
 lara_bymonth_urgent_open = lara_bymonth %>%
   lm_quick('MORTALITY','GLOBAL','URGENT','OPEN',75)
 table_row_urgent_open = lara_bymonth_urgent_open[['row']]
-IKB_urgent_open = lara_bymonth_urgent_open[['ikb']]
+IKB_urgent_open = lara_bymonth_urgent_open[['bw']]
 lara_bymonth_urgent_open = lara_bymonth_urgent_open[['newdata']]
 
 lara_bymonth_elective_open = lara_bymonth %>%
   lm_quick('MORTALITY','GLOBAL','ELECTIVE','OPEN',75)
 table_row_elective_open = lara_bymonth_elective_open[['row']]
-IKB_elective_open = lara_bymonth_elective_open[['ikb']]
+IKB_elective_open = lara_bymonth_elective_open[['bw']]
 lara_bymonth_elective_open = lara_bymonth_elective_open[['newdata']]
 
 lara_bymonth_urgent_endo = lara_bymonth %>%
   lm_quick('MORTALITY','GLOBAL','URGENT','ENDO',75)
 table_row_urgent_endo = lara_bymonth_urgent_endo[['row']]
-IKB_urgent_endo = lara_bymonth_urgent_endo[['ikb']]
+IKB_urgent_endo = lara_bymonth_urgent_endo[['bw']]
 lara_bymonth_urgent_endo = lara_bymonth_urgent_endo[['newdata']]
 
 lara_bymonth_elective_endo = lara_bymonth %>%
   lm_quick('MORTALITY','GLOBAL','ELECTIVE','ENDO',75)
 table_row_elective_endo = lara_bymonth_elective_endo[['row']]
-IKB_elective_endo = lara_bymonth_elective_endo[['ikb']]
+IKB_elective_endo = lara_bymonth_elective_endo[['bw']]
 lara_bymonth_elective_endo = lara_bymonth_elective_endo[['newdata']]
 
 # simple OLS over the entire study period, URGENCY and TYPE
@@ -1246,19 +1335,19 @@ list(table_row_urgent_all, table_row_elective_all) %>%
 lara_bymonth_urgent = lara_bymonth %>%
   lm_quick('MORTALITY','GLOBAL','URGENT','ALL',75)
 table_row_urgent = lara_bymonth_urgent[['row']]
-# IKB_urgent = lara_bymonth_urgent[['ikb']]
+# IKB_urgent = lara_bymonth_urgent[['bw']]
 # lara_bymonth_urgent = lara_bymonth_urgent[['newdata']]
 
 lara_bymonth_elective = lara_bymonth %>%
   lm_quick('MORTALITY','GLOBAL','ELECTIVE','ALL',75)
 table_row_elective = lara_bymonth_elective[['row']]
-# IKB_elective = lara_bymonth_elective[['ikb']]
+# IKB_elective = lara_bymonth_elective[['bw']]
 # lara_bymonth_elective = lara_bymonth_elective[['newdata']]
 
 lara_bymonth_all = lara_bymonth %>%
   lm_quick('MORTALITY','GLOBAL','ALL','ALL',75)
 table_row_all = lara_bymonth_all[['row']]
-# IKB_all = lara_bymonth_all[['ikb']]
+# IKB_all = lara_bymonth_all[['bw']]
 # lara_bymonth_all = lara_bymonth_all[['newdata']]
 
 # simple OLS over the entire study period
